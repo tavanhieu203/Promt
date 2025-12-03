@@ -1,68 +1,76 @@
-import os
+import os 
 import numpy as np
-import torch
-import torch.utils.data as data
+import torch.utils.data
 from scipy import io
-import glob
+from PIL import Image
 
-class iBims(data.Dataset):
+
+class valset(torch.utils.data.Dataset):
     def __init__(self, args):
-        self.dataset_path = args.dataset_path
-        # Tìm file imagelist.txt
-        candidates = glob.glob(os.path.join(self.dataset_path, "**/imagelist.txt"), recursive=True)
-        if not candidates:
-            raise FileNotFoundError("Không tìm thấy imagelist.txt")
-        self.list_path = candidates[0]
+        self.args = args
+        with open(os.path.join(args.dataset_path, 'ibims1_core_mat/imagelist.txt')) as f:
+            image_names = f.readlines()
+            self.image_names = [x.strip() for x in image_names] 
+            
+        
+    def __getitem__(self, index): # "/workspace/data_all/ibims1_core_mat/"
+        image_data = io.loadmat(os.path.join(os.path.join(self.args.dataset_path, 'ibims1_core_mat'), self.image_names[index])) #  + self.image_names[index])
 
-        with open(self.list_path, "r") as f:
-            self.image_names = [x.strip() for x in f.readlines()]
+        #k_path = "/workspace/data_all/ibims1_core_raw/calib/" + self.image_names[index] + '.txt'
+        k_path = os.path.join(os.path.join(self.args.dataset_path, 'ibims1_core_raw/calib'), self.image_names[index] + '.txt')
+        if not os.path.exists(k_path):
+            print('No K file')
+            raise ValueError
+        k = np.loadtxt(k_path, delimiter=',')
 
-    def __getitem__(self, idx):
-        file_name = self.image_names[idx]
-        name_base = os.path.splitext(file_name)[0]
+        data = image_data['data']
+        
+        rgb = data['rgb'][0][0] / 255.0
+        depth = data['depth'][0][0]
+        mask_invalid = data['mask_invalid'][0][0]
+        mask_transp = data['mask_transp'][0][0]
+        mask_missing = depth.copy()
+        mask_missing[mask_missing!=0] = 1
+        mask_valid = mask_invalid * mask_transp * mask_missing
+        
+        edges = data['edges'][0][0]
+        
+        rgb_np = np.array(rgb).astype(np.float32).transpose(2, 0, 1)
+        depth_np = np.array(depth).astype(np.float32)
+        
+        depth_np = depth_np * mask_valid
+        
+        rgb_torch = torch.from_numpy(rgb_np).float()
+        depth_torch = torch.from_numpy(depth_np).float().unsqueeze(0)
+        sparse_depth = self.get_sparse_depth(depth_torch, 1000)
+        
+        k = torch.from_numpy(k).float()
 
-        # Tìm file .mat
-        mat_files = glob.glob(os.path.join(self.dataset_path, "**", file_name), recursive=True)
-        if not mat_files:
-            raise FileNotFoundError(f"Không tìm thấy file mat: {file_name}")
-        mat_path = mat_files[0]
-
-        # Tìm calib
-        calib_files = glob.glob(os.path.join(self.dataset_path, "**/calib/" + name_base + ".txt"), recursive=True)
-        K = np.loadtxt(calib_files[0], delimiter=",") if calib_files else np.eye(3)
-
-        # Load dữ liệu
-        mat_data = io.loadmat(mat_path)["data"]
-        rgb = mat_data["rgb"][0][0] / 255.0
-        depth = mat_data["depth"][0][0]
-
-        # Tạo mask
-        mask_valid = np.ones_like(depth, dtype=np.float32)
-        for key in ["mask_invalid","mask_transp"]:
-            if key in mat_data:
-                mask_valid *= mat_data[key][0][0].astype(np.float32)
-        mask_valid *= (depth != 0).astype(np.float32)
-
-        # Chuyển sang Tensor
-        rgb_t = torch.tensor(rgb.astype(np.float32).transpose(2,0,1))
-        depth_t = torch.tensor((depth * mask_valid).astype(np.float32))[None, ...]
-        sparse_dep = self.get_sparse_depth(depth_t, 1000)
-        K_t = torch.tensor(K.astype(np.float32))
-
-        return {"rgb": rgb_t, "dep": sparse_dep, "gt": depth_t, "K": K_t, "filename": file_name}
+        output = {'rgb': rgb_torch, 'dep': sparse_depth,
+                  'gt': depth_torch, 'K': k}
+        
+        return output
 
     def __len__(self):
         return len(self.image_names)
 
-    def get_sparse_depth(self, dep, num_sample):
-        c,h,w = dep.shape
-        idx = torch.nonzero(dep>0.001).flatten()
-        if idx.numel()==0: return torch.zeros_like(dep)
-        sample = idx[torch.randperm(len(idx))[:num_sample]]
-        mask = torch.zeros_like(dep.view(-1))
-        mask[sample] = 1
-        mask = mask.view(c,h,w)
-        return dep * mask
 
-def valset(args):
-    return iBims(args)
+    def get_sparse_depth(self, dep, num_sample):
+        channel, height, width = dep.shape
+
+        assert channel == 1
+
+        idx_nnz = torch.nonzero(dep.reshape(-1) > 0.0001, as_tuple=False)
+
+        num_idx = len(idx_nnz)
+        idx_sample = torch.randperm(num_idx)[:num_sample]
+
+        idx_nnz = idx_nnz[idx_sample[:]]
+
+        mask = torch.zeros((channel*height*width))
+        mask[idx_nnz] = 1.0
+        mask = mask.view((channel, height, width))
+    
+        dep_sp = dep * mask.type_as(dep)
+
+        return dep_sp

@@ -21,7 +21,7 @@ args.add_argument('--random_seed', type=int, default=2025)
 args.add_argument('--epochs', type=int, default=50)
 args.add_argument('--exp_name', type=str, default='base') 
 args.add_argument('--mode', type=str, default='VP', choices=['VP', 'FT'])
-args.add_argument('--dataset', type=str, default='ibims', choices=['ibims', 'ddad'])
+args.add_argument('--dataset', type=str, default='ibims', choices=['ibims', 'ddad','nyu'])
 args.add_argument('--dataset_path', type=str, default='/workspace/data_all')
 
 args = args.parse_args()
